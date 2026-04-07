@@ -1,0 +1,7 @@
+anthropic
+pdfplumber
+chromadb
+fastembed
+sentence-transformers
+click
+python-dotenv
