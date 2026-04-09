@@ -5,3 +5,5 @@ fastembed
 sentence-transformers
 click
 python-dotenv
+numpy
+scikit-learn

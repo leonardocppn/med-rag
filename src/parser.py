@@ -3,14 +3,19 @@ parser.py
 
 Reads a PDF page by page, extracts every text element with its coordinates
 (x0, y0, x1, y1) and classifies it into a logical region: header, footer,
-title, or body.
+title, table, or body.
 
 pdfplumber provides for each word on the page:
   text, x0, y0, x1, y1, top, bottom, fontname, size
 
 These are used to group words into lines, lines into paragraph blocks,
 and each block is classified based on its vertical position and font size.
+
+Layout parameters can be supplied externally via ParsingParams
+(see profiler.py) to adapt to different document layouts.
 """
+
+from __future__ import annotations
 
 import pdfplumber
 from dataclasses import dataclass
@@ -19,7 +24,7 @@ from dataclasses import dataclass
 @dataclass
 class Block:
     page: int
-    region: str        # "title" | "header" | "footer" | "body"
+    region: str        # "title" | "header" | "footer" | "table" | "body"
     text: str
     top: float         # distance from the top edge of the page (points)
     font_size: float
@@ -32,14 +37,17 @@ def _median(values: list[float]) -> float:
 
 
 def _classify_region(top: float, page_height: float,
-                     font_size: float, median_size: float) -> str:
+                     font_size: float, median_size: float,
+                     header_threshold: float = 0.08,
+                     footer_threshold: float = 0.92,
+                     title_font_ratio: float = 1.4) -> str:
     relative_pos = top / page_height
 
-    if relative_pos < 0.08:
+    if relative_pos < header_threshold:
         return "header"
-    if relative_pos > 0.92:
+    if relative_pos > footer_threshold:
         return "footer"
-    if font_size >= median_size * 1.4:
+    if font_size >= median_size * title_font_ratio:
         return "title"
     return "body"
 
@@ -66,6 +74,31 @@ def _group_words_into_lines(words: list[dict],
     return lines
 
 
+def _compute_adaptive_gap(lines: list[list[dict]],
+                          multiplier: float = 2.0,
+                          minimum: float = 10.0,
+                          fallback: float = 12.0) -> float:
+    """Computes the block separation gap based on the median spacing
+    between consecutive lines on the page.
+    Never goes below `minimum` to avoid excessive fragmentation."""
+    if len(lines) < 2:
+        return fallback
+
+    gaps = []
+    for i in range(len(lines) - 1):
+        prev_bottom = max(w["bottom"] for w in lines[i])
+        curr_top = min(w["top"] for w in lines[i + 1])
+        gap = curr_top - prev_bottom
+        if gap > 0:
+            gaps.append(gap)
+
+    if not gaps:
+        return fallback
+
+    median_gap = _median(gaps)
+    return max(median_gap * multiplier, minimum)
+
+
 def _lines_to_blocks(lines: list[list[dict]],
                      block_gap: float = 12.0) -> list[dict]:
     """Merges adjacent lines into paragraph blocks."""
@@ -88,10 +121,104 @@ def _lines_to_blocks(lines: list[list[dict]],
     return blocks
 
 
-def extract_blocks(pdf_path: str) -> list[Block]:
+def _detect_columns(lines: list[list[dict]],
+                    tolerance: float = 5.0,
+                    min_ratio: float = 0.20) -> list[float]:
+    """Finds recurring x0 positions that indicate columns.
+    Returns x0 values that appear in at least min_ratio of the lines."""
+    from collections import Counter
+
+    if not lines:
+        return []
+
+    x0_values = [round(word["x0"] / tolerance) * tolerance
+                 for line in lines
+                 for word in line]
+
+    counts = Counter(x0_values)
+    threshold = len(lines) * min_ratio
+    columns = sorted(x for x, count in counts.items() if count >= threshold)
+    return columns
+
+
+def _format_line_with_columns(line: list[dict],
+                              columns: list[float]) -> str:
+    """Formats a line by assigning words to the nearest column.
+    Returns columns separated by ' | '."""
+    if not columns:
+        return " ".join(w["text"] for w in line)
+
+    col_texts: dict[int, list[str]] = {}
+    for word in line:
+        col_idx = min(range(len(columns)),
+                      key=lambda i: abs(word["x0"] - columns[i]))
+        col_texts.setdefault(col_idx, []).append(word["text"])
+
+    parts = []
+    for idx in sorted(col_texts):
+        parts.append(" ".join(col_texts[idx]))
+    return " | ".join(parts)
+
+
+def _format_block_text(block_words: list[dict],
+                       lines: list[list[dict]],
+                       columns: list[float],
+                       min_columns_for_table: int = 3) -> str:
+    """Formats a block's text. If the page has enough columns,
+    the block's lines are formatted as a structured table.
+    Otherwise, words are concatenated normally."""
+    if len(columns) < min_columns_for_table:
+        return " ".join(w["text"] for w in block_words).strip()
+
+    # Reconstruct lines within this block
+    block_lines = _group_words_into_lines(block_words)
+    formatted = []
+    for line in block_lines:
+        formatted.append(_format_line_with_columns(line, columns))
+    return "\n".join(formatted)
+
+
+def _clean_text(text: str) -> str:
+    """Removes layout artifacts from extracted text:
+    lines of only dashes, isolated dots, the word 'vuoto' (empty)."""
+    import re
+    lines = text.split("\n")
+    cleaned = []
+    for line in lines:
+        # Remove lines of only dashes/dots/pipes
+        if re.match(r'^[\s.\-|]+$', line):
+            continue
+        # Remove isolated dots in columns (". |" or "| .")
+        line = re.sub(r'\.\s*\|', '|', line)
+        line = re.sub(r'\|\s*\.(\s*\|)', r'|\1', line)
+        line = re.sub(r'\|\s*\.\.?\s*$', '', line)
+        line = re.sub(r'^\.\s*\|', '|', line)
+        # Remove "vuoto" as an isolated word
+        line = re.sub(r'\bvuoto\b', '', line)
+        # Remove empty residual pipes and multiple spaces
+        line = re.sub(r'\|\s*\|', '|', line)
+        line = re.sub(r'^\s*\|\s*', '', line)
+        line = re.sub(r'\s*\|\s*$', '', line)
+        line = re.sub(r'\s{2,}', ' ', line).strip()
+        if line:
+            cleaned.append(line)
+    return "\n".join(cleaned)
+
+
+def extract_blocks(pdf_path: str,
+                   header_threshold: float = 0.08,
+                   footer_threshold: float = 0.92,
+                   title_font_ratio: float = 1.4,
+                   line_gap: float = 3.0,
+                   block_gap_multiplier: float = 2.0,
+                   block_gap_minimum: float = 10.0,
+                   min_columns_for_table: int = 3) -> list[Block]:
     """
     Reads the PDF and returns a list of Blocks sorted by page
     and vertical position.
+
+    Layout parameters can be customized to adapt to different
+    document types (see profiler.py).
     """
     result = []
 
@@ -110,11 +237,19 @@ def extract_blocks(pdf_path: str) -> list[Block]:
             sizes = [w.get("size", 10) or 10 for w in words]
             median_size = _median(sizes)
 
-            lines = _group_words_into_lines(words)
-            raw_blocks = _lines_to_blocks(lines)
+            lines = _group_words_into_lines(words, line_gap=line_gap)
+            block_gap = _compute_adaptive_gap(
+                lines, multiplier=block_gap_multiplier,
+                minimum=block_gap_minimum,
+            )
+            columns = _detect_columns(lines)
+            raw_blocks = _lines_to_blocks(lines, block_gap=block_gap)
 
             for block_words in raw_blocks:
-                text = " ".join(w["text"] for w in block_words).strip()
+                text = _clean_text(_format_block_text(
+                    block_words, lines, columns,
+                    min_columns_for_table=min_columns_for_table,
+                ))
                 if not text:
                     continue
 
@@ -122,7 +257,10 @@ def extract_blocks(pdf_path: str) -> list[Block]:
                 font_size = _median([w.get("size", 10) or 10
                                      for w in block_words])
                 region = _classify_region(
-                    top, page_height, font_size, median_size
+                    top, page_height, font_size, median_size,
+                    header_threshold=header_threshold,
+                    footer_threshold=footer_threshold,
+                    title_font_ratio=title_font_ratio,
                 )
 
                 result.append(Block(
@@ -136,6 +274,34 @@ def extract_blocks(pdf_path: str) -> list[Block]:
     return result
 
 
+def _extract_date_from_headers(blocks: list[Block]) -> dict[int, str]:
+    """Searches for dates in header/body blocks of each page.
+    Returns {page_number: 'Date: ...'} for pages where a date is found."""
+    import re
+    date_patterns = [
+        r'(\d{2}-\d{2}-\d{4})\s*Data\s+Check-in',
+        r'Data\s+Check-in\s+(\d{2}-\d{2}-\d{4})',
+        r'Data\s*\|?\s*Accettazione:\s+(\d{2}/\d{2}/\d{2,4})',
+        r'Accettazione:\s+(\d{2}/\d{2}/\d{2,4})',
+        r'del:\s+(\d{2}/\d{2}/\d{4})',
+    ]
+    found_date = None
+    for b in blocks:
+        if found_date:
+            break
+        for pattern in date_patterns:
+            m = re.search(pattern, b.text)
+            if m:
+                found_date = f"Report date: {m.group(1)}"
+                break
+
+    if not found_date:
+        return {}
+
+    all_pages = {b.page for b in blocks}
+    return {page: found_date for page in all_pages}
+
+
 def blocks_to_chunks(blocks: list[Block],
                      skip_regions: set[str] | None = None,
                      overlap: int = 1) -> list[dict]:
@@ -143,12 +309,15 @@ def blocks_to_chunks(blocks: list[Block],
     Converts Blocks into chunks ready for indexing.
     Each chunk has: text, page, region.
     Header and footer blocks are discarded by default.
+    Dates extracted from headers are prepended to chunks.
 
     overlap: number of preceding blocks to include as context,
     useful for capturing information at paragraph boundaries.
     """
     if skip_regions is None:
         skip_regions = {"header", "footer"}
+
+    page_dates = _extract_date_from_headers(blocks)
 
     filtered = [
         b for b in blocks
@@ -159,8 +328,14 @@ def blocks_to_chunks(blocks: list[Block],
     for i, b in enumerate(filtered):
         prefix_blocks = filtered[max(0, i - overlap):i]
         parts = [pb.text for pb in prefix_blocks] + [b.text]
+        text = "\n\n".join(parts)
+
+        date_prefix = page_dates.get(b.page)
+        if date_prefix:
+            text = f"{date_prefix}\n\n{text}"
+
         chunks.append({
-            "text": "\n\n".join(parts),
+            "text": text,
             "page": b.page,
             "region": b.region,
         })
