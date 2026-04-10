@@ -8,7 +8,10 @@ Each document (PDF) gets its own ChromaDB collection, identified by filename.
 Multiple PDFs can also be grouped into a named corpus collection.
 """
 
+import io
+import sys
 import hashlib
+import contextlib
 import chromadb
 from fastembed import TextEmbedding
 
@@ -18,6 +21,9 @@ MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 # Cross-encoder model for re-ranking (multilingual, ~100MB)
 RERANK_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 
+# Set to True by cli.py when the user passes --show
+VERBOSE = False
+
 _model: TextEmbedding | None = None
 _rerank_model = None
 
@@ -25,8 +31,12 @@ _rerank_model = None
 def _get_model() -> TextEmbedding:
     global _model
     if _model is None:
-        print(f"Loading embedding model {MODEL_NAME} (first run, ~50MB)...")
-        _model = TextEmbedding(MODEL_NAME)
+        if VERBOSE:
+            print(f"Loading embedding model {MODEL_NAME} (first run, ~50MB)...")
+            _model = TextEmbedding(MODEL_NAME)
+        else:
+            with contextlib.redirect_stdout(io.StringIO()):
+                _model = TextEmbedding(MODEL_NAME)
     return _model
 
 
@@ -34,8 +44,12 @@ def _get_rerank_model():
     global _rerank_model
     if _rerank_model is None:
         from sentence_transformers import CrossEncoder
-        print("Loading re-ranking model (first run, ~100MB)...")
-        _rerank_model = CrossEncoder(RERANK_MODEL)
+        if VERBOSE:
+            print("Loading re-ranking model (first run, ~100MB)...")
+            _rerank_model = CrossEncoder(RERANK_MODEL)
+        else:
+            with contextlib.redirect_stdout(io.StringIO()):
+                _rerank_model = CrossEncoder(RERANK_MODEL)
     return _rerank_model
 
 
@@ -65,6 +79,7 @@ def index_chunks(chunks: list[dict], pdf_path: str,
     client = chromadb.PersistentClient(path=db_path)
     col_name = _collection_name(pdf_path)
 
+    # Delete existing collection before re-indexing
     try:
         client.delete_collection(col_name)
     except Exception:
@@ -83,8 +98,30 @@ def index_chunks(chunks: list[dict], pdf_path: str,
                    for c in chunks],
     )
 
-    print(f"Indexed {len(chunks)} chunks → collection '{col_name}'")
+    if VERBOSE:
+        print(f"Indexed {len(chunks)} chunks → collection '{col_name}'")
     return col_name
+
+
+def file_hash(pdf_path: str) -> str:
+    """MD5 hash of file contents (to detect duplicates regardless of path)."""
+    h = hashlib.md5()
+    with open(pdf_path, "rb") as f:
+        for block in iter(lambda: f.read(65536), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def corpus_has_file(corpus_name: str, fhash: str, db_path: str = "./chroma_db") -> bool:
+    """Checks whether a file with this content hash is already in the corpus."""
+    client = chromadb.PersistentClient(path=db_path)
+    col_name = corpus_collection_name(corpus_name)
+    try:
+        collection = client.get_collection(col_name)
+        results = collection.get(where={"file_hash": fhash}, limit=1)
+        return len(results["ids"]) > 0
+    except Exception:
+        return False
 
 
 def index_chunks_to_corpus(chunks: list[dict], corpus_name: str,
@@ -113,6 +150,7 @@ def index_chunks_to_corpus(chunks: list[dict], corpus_name: str,
     except Exception:
         pass
 
+    fhash = file_hash(pdf_path)
     texts = [c["text"] for c in chunks]
     embeddings = list(model.embed(texts))
 
@@ -125,10 +163,12 @@ def index_chunks_to_corpus(chunks: list[dict], corpus_name: str,
             "region": c["region"],
             "pdf_path": pdf_path,
             "pdf_id": pdf_id,
+            "file_hash": fhash,
         } for c in chunks],
     )
 
-    print(f"Indexed {len(chunks)} chunks from '{pdf_path}' → corpus '{col_name}'")
+    if VERBOSE:
+        print(f"Indexed {len(chunks)} chunks from '{pdf_path}' → corpus '{col_name}'")
     return col_name
 
 

@@ -31,23 +31,57 @@ Get your API key at [console.anthropic.com](https://console.anthropic.com).
 ### Index a PDF
 
 ```bash
+# Single PDF
 python -m src.cli index path/to/document.pdf
+
+# A directory (auto: single PDF → individual index, multiple → auto-named corpus)
+python -m src.cli index data/
+
+# Multiple PDFs → automatic corpus
+python -m src.cli index data/1.pdf data/2.pdf
+
+# Explicit corpus name
+python -m src.cli index data/ --corpus my-corpus
 ```
 
 The PDF is automatically profiled to derive optimal parsing parameters (header/footer boundaries, block gap thresholds, column detection, etc.).
 
+### Index multiple PDFs into a corpus (alias)
+
+```bash
+python -m src.cli index-multi --corpus my-corpus doc1.pdf doc2.pdf doc3.pdf
+```
+
+### Sync a directory (incremental indexing)
+
+```bash
+# Only index new PDFs in a directory, skip already-indexed ones
+python -m src.cli sync data/
+
+# With explicit corpus name
+python -m src.cli sync data/ --corpus my-corpus
+```
+
+Uses content-based hashing to detect duplicates regardless of filename or path.
+
 ### Ask a question
 
 ```bash
-# default
+# About a single PDF
 python -m src.cli ask path/to/document.pdf "What are the main conclusions?"
 
-# with cross-encoder re-ranking (more precise, downloads ~100MB on first run)
+# About a corpus
+python -m src.cli ask my-corpus "What do these documents have in common?"
+
+# With cross-encoder re-ranking (more precise, downloads ~100MB on first run)
 python -m src.cli ask path/to/document.pdf "What are the main conclusions?" --rerank
 
-# with a custom system prompt
+# With a custom system prompt
 python -m src.cli ask path/to/document.pdf "What are the main conclusions?" \
   --system "You are a medical expert. Answer in technical terms."
+
+# Corpus-specific alias
+python -m src.cli ask-corpus my-corpus "What medications are mentioned?"
 ```
 
 ### Generate a structured summary
@@ -59,20 +93,17 @@ python -m src.cli summary path/to/document.pdf
 ### Interactive multi-turn chat
 
 ```bash
+# Chat about a single PDF
 python -m src.cli chat path/to/document.pdf
+
+# Chat across a corpus
+python -m src.cli chat my-corpus
+
+# Corpus-specific alias
+python -m src.cli chat-corpus my-corpus
 ```
 
 Type `exit` to quit the session.
-
-### Multi-document corpus
-
-```bash
-# Index multiple PDFs into a named corpus
-python -m src.cli index-multi --corpus my-corpus doc1.pdf doc2.pdf doc3.pdf
-
-# Ask a question across all documents
-python -m src.cli ask-corpus my-corpus "What do these documents have in common?"
-```
 
 ### Delete indexed data
 
@@ -116,13 +147,22 @@ Groups PDFs into clusters based on layout similarity using DBSCAN on normalized 
 python -m src.cli inspect path/to/document.pdf
 ```
 
-## Options
+## Global options
+
+| Option | Description |
+|--------|-------------|
+| `--show` | Show verbose output from embedding and re-ranking models (suppressed by default) |
+
+Example: `python -m src.cli --show index data/1.pdf`
+
+## Command options
 
 | Option | Commands | Description |
 |--------|----------|-------------|
-| `--n N` | `ask`, `ask-corpus`, `chat` | Number of chunks to retrieve (default: 5) |
+| `--corpus <name>` | `index`, `sync` | Corpus name (auto-assigned if omitted) |
+| `--n N` | `ask`, `ask-corpus`, `chat`, `chat-corpus` | Number of chunks to retrieve (default: 5) |
 | `--rerank` | `ask`, `ask-corpus` | Enable cross-encoder re-ranking |
-| `--system "..."` | `ask`, `ask-corpus`, `summary`, `chat` | Optional system prompt for Claude |
+| `--system "..."` | `ask`, `ask-corpus`, `summary`, `chat`, `chat-corpus` | Optional system prompt for Claude |
 | `--eps N` | `cluster` | DBSCAN radius (0-1, default: automatic) |
 | `--pdf <path>` | `delete-corpus` | Remove only one PDF from a corpus |
 
@@ -142,3 +182,4 @@ python -m src.cli inspect path/to/document.pdf
 - Everything stays local: embeddings and chunks are stored in `./chroma_db`. Only the final query is sent to the Anthropic API.
 - The embedding model (~50MB) is downloaded on first run from HuggingFace. The re-ranking model (~100MB) is downloaded only if `--rerank` is used.
 - Layout profiling is fully adaptive: every parameter is derived from the PDF's own metrics, with no hardcoded document types.
+- Model loading output is suppressed by default for a cleaner experience. Use `--show` to see it.

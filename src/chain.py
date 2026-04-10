@@ -7,7 +7,7 @@ to answer questions grounded in the document content.
 
 from typing import Iterator
 import anthropic
-from .indexer import retrieve, retrieve_all, retrieve_from_corpus, rerank as rerank_chunks
+from .indexer import retrieve, retrieve_all, retrieve_from_corpus, rerank as rerank_chunks, corpus_collection_name
 
 
 def _build_context(chunks: list[dict], with_source: bool = False) -> str:
@@ -93,6 +93,37 @@ def chat_stream(messages: list[dict], col_name: str,
     augmented_user_message = f"Excerpts from the document:\n\n{context}\n\n---\nQuestion: {query}"
 
     # Replace the last user message with the context-enriched version
+    augmented_messages = messages[:-1] + [{"role": "user", "content": augmented_user_message}]
+
+    client = anthropic.Anthropic()
+    kwargs = dict(model="claude-haiku-4-5-20251001", max_tokens=1024,
+                  messages=augmented_messages)
+    if system_prompt:
+        kwargs["system"] = system_prompt
+    with client.messages.stream(**kwargs) as stream:
+        for text in stream.text_stream:
+            yield text
+
+
+def chat_corpus_stream(messages: list[dict], corpus_name: str,
+                       db_path: str = "./chroma_db",
+                       n_results: int = 5,
+                       system_prompt: str | None = None) -> Iterator[str]:
+    """
+    Multi-turn chat over a multi-document corpus.
+
+    messages: list of {"role": "user"|"assistant", "content": str}
+    The last message must have role "user".
+    """
+    query = messages[-1]["content"]
+    chunks = retrieve_from_corpus(query, corpus_name, db_path=db_path, n_results=n_results)
+
+    if not chunks:
+        yield "No relevant content found in the corpus."
+        return
+
+    context = _build_context(chunks, with_source=True)
+    augmented_user_message = f"Excerpts from the corpus:\n\n{context}\n\n---\nQuestion: {query}"
     augmented_messages = messages[:-1] + [{"role": "user", "content": augmented_user_message}]
 
     client = anthropic.Anthropic()
