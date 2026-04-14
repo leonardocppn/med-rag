@@ -180,7 +180,7 @@ def _format_block_text(block_words: list[dict],
 
 def _clean_text(text: str) -> str:
     """Removes layout artifacts from extracted text:
-    lines of only dashes, isolated dots, the word 'vuoto' (empty)."""
+    lines of only dashes, isolated dots."""
     import re
     lines = text.split("\n")
     cleaned = []
@@ -193,8 +193,6 @@ def _clean_text(text: str) -> str:
         line = re.sub(r'\|\s*\.(\s*\|)', r'|\1', line)
         line = re.sub(r'\|\s*\.\.?\s*$', '', line)
         line = re.sub(r'^\.\s*\|', '|', line)
-        # Remove "vuoto" as an isolated word
-        line = re.sub(r'\bvuoto\b', '', line)
         # Remove empty residual pipes and multiple spaces
         line = re.sub(r'\|\s*\|', '|', line)
         line = re.sub(r'^\s*\|\s*', '', line)
@@ -274,32 +272,32 @@ def extract_blocks(pdf_path: str,
     return result
 
 
-def _extract_date_from_headers(blocks: list[Block]) -> dict[int, str]:
-    """Searches for dates in header/body blocks of each page.
-    Returns {page_number: 'Date: ...'} for pages where a date is found."""
-    import re
-    date_patterns = [
-        r'(\d{2}-\d{2}-\d{4})\s*Data\s+Check-in',
-        r'Data\s+Check-in\s+(\d{2}-\d{2}-\d{4})',
-        r'Data\s*\|?\s*Accettazione:\s+(\d{2}/\d{2}/\d{2,4})',
-        r'Accettazione:\s+(\d{2}/\d{2}/\d{2,4})',
-        r'del:\s+(\d{2}/\d{2}/\d{4})',
-    ]
-    found_date = None
-    for b in blocks:
-        if found_date:
-            break
-        for pattern in date_patterns:
-            m = re.search(pattern, b.text)
-            if m:
-                found_date = f"Report date: {m.group(1)}"
-                break
 
-    if not found_date:
-        return {}
+def extract_blocks_plain(pdf_path: str) -> list[Block]:
+    """
+    Plain-text extraction: reads the PDF page by page and returns one
+    Block per page with region="body". No layout analysis, no column
+    detection, no header/footer classification.
 
-    all_pages = {b.page for b in blocks}
-    return {page: found_date for page in all_pages}
+    Best for simple one-column documents or scanned/OCR PDFs where
+    the layout structure is unreliable.
+    """
+    result = []
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_num, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text()
+            if not text or not text.strip():
+                continue
+            result.append(Block(
+                page=page_num,
+                region="body",
+                text=text.strip(),
+                top=0.0,
+                font_size=0.0,
+            ))
+
+    return result
 
 
 def blocks_to_chunks(blocks: list[Block],
@@ -309,15 +307,12 @@ def blocks_to_chunks(blocks: list[Block],
     Converts Blocks into chunks ready for indexing.
     Each chunk has: text, page, region.
     Header and footer blocks are discarded by default.
-    Dates extracted from headers are prepended to chunks.
 
     overlap: number of preceding blocks to include as context,
     useful for capturing information at paragraph boundaries.
     """
     if skip_regions is None:
         skip_regions = {"header", "footer"}
-
-    page_dates = _extract_date_from_headers(blocks)
 
     filtered = [
         b for b in blocks
@@ -329,10 +324,6 @@ def blocks_to_chunks(blocks: list[Block],
         prefix_blocks = filtered[max(0, i - overlap):i]
         parts = [pb.text for pb in prefix_blocks] + [b.text]
         text = "\n\n".join(parts)
-
-        date_prefix = page_dates.get(b.page)
-        if date_prefix:
-            text = f"{date_prefix}\n\n{text}"
 
         chunks.append({
             "text": text,

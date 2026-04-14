@@ -1,8 +1,10 @@
 anthropic
+ollama
 pdfplumber
 chromadb
 fastembed
 sentence-transformers
+rank-bm25
 click
 python-dotenv
 numpy

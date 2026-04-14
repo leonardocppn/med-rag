@@ -408,9 +408,9 @@ class ProfileStore:
 
     @staticmethod
     def _auto_eps(X_norm: np.ndarray, percentile: float = 50.0) -> float:
-        """Estimates eps as a low percentile of pairwise distances.
+        """Estimates eps as a percentile of pairwise distances.
 
-        With few documents the 30th percentile separates distinct document
+        With few documents the 50th percentile separates distinct document
         types without fragmenting similar ones.
         """
         from itertools import combinations
@@ -432,7 +432,7 @@ class ProfileStore:
         singleton cluster.
 
         eps: maximum neighborhood radius (on normalized 0-1 features).
-             If None, computed automatically from the 30th percentile
+             If None, computed automatically from the 50th percentile
              of pairwise distances.
         min_samples: minimum profiles to form a cluster.
         """

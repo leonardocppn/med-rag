@@ -9,6 +9,7 @@ Multiple PDFs can also be grouped into a named corpus collection.
 """
 
 import io
+import os
 import sys
 import hashlib
 import contextlib
@@ -63,6 +64,11 @@ def _collection_name(pdf_path: str) -> str:
     return f"{safe}_{h}"
 
 
+def pdf_id(pdf_path: str) -> str:
+    """Short identifier for a PDF path within a corpus (8-char MD5 of the path)."""
+    return hashlib.md5(pdf_path.encode()).hexdigest()[:8]
+
+
 def corpus_collection_name(corpus_name: str) -> str:
     safe = "".join(c if c.isalnum() else "_" for c in corpus_name)[:55]
     return f"corpus_{safe}"
@@ -99,7 +105,7 @@ def index_chunks(chunks: list[dict], pdf_path: str,
     )
 
     if VERBOSE:
-        print(f"Indexed {len(chunks)} chunks → collection '{col_name}'")
+        print(f"Indexed {len(chunks)} chunks -> collection '{col_name}'")
     return col_name
 
 
@@ -136,40 +142,44 @@ def index_chunks_to_corpus(chunks: list[dict], corpus_name: str,
     client = chromadb.PersistentClient(path=db_path)
     col_name = corpus_collection_name(corpus_name)
 
-    try:
-        collection = client.get_collection(col_name)
-    except Exception:
-        collection = client.create_collection(col_name)
+    collection = client.get_or_create_collection(col_name)
 
     # Remove existing chunks from this PDF before re-indexing
-    pdf_id = hashlib.md5(pdf_path.encode()).hexdigest()[:8]
-    try:
-        existing = collection.get(where={"pdf_id": pdf_id})
-        if existing["ids"]:
-            collection.delete(ids=existing["ids"])
-    except Exception:
-        pass
+    _pdf_id = pdf_id(pdf_path)
+    existing = collection.get(where={"pdf_id": _pdf_id})
+    if existing["ids"]:
+        collection.delete(ids=existing["ids"])
 
     fhash = file_hash(pdf_path)
     texts = [c["text"] for c in chunks]
     embeddings = list(model.embed(texts))
 
     collection.add(
-        ids=[f"{pdf_id}_{i}" for i in range(len(chunks))],
+        ids=[f"{_pdf_id}_{i}" for i in range(len(chunks))],
         embeddings=embeddings,
         documents=texts,
         metadatas=[{
             "page": c["page"],
             "region": c["region"],
             "pdf_path": pdf_path,
-            "pdf_id": pdf_id,
+            "pdf_id": _pdf_id,
             "file_hash": fhash,
         } for c in chunks],
     )
 
     if VERBOSE:
-        print(f"Indexed {len(chunks)} chunks from '{pdf_path}' → corpus '{col_name}'")
+        print(f"Indexed {len(chunks)} chunks from '{pdf_path}' -> corpus '{col_name}'")
     return col_name
+
+
+def collection_exists(col_name: str, db_path: str = "./chroma_db") -> bool:
+    """Returns True if a ChromaDB collection exists."""
+    client = chromadb.PersistentClient(path=db_path)
+    try:
+        client.get_collection(col_name)
+        return True
+    except Exception:
+        return False
 
 
 def retrieve(query: str, col_name: str,
@@ -248,6 +258,23 @@ def retrieve_all(col_name: str, db_path: str = "./chroma_db") -> list[dict]:
     return sorted(chunks, key=lambda c: c["page"])
 
 
+def retrieve_all_corpus(corpus_name: str, db_path: str = "./chroma_db") -> list[dict]:
+    """Returns all chunks in a multi-document corpus."""
+    client = chromadb.PersistentClient(path=db_path)
+    col_name = corpus_collection_name(corpus_name)
+    collection = client.get_collection(col_name)
+    results = collection.get(include=["documents", "metadatas"])
+    return [
+        {
+            "text": doc,
+            "page": meta["page"],
+            "region": meta["region"],
+            "pdf_path": meta.get("pdf_path", "unknown"),
+        }
+        for doc, meta in zip(results["documents"], results["metadatas"])
+    ]
+
+
 def rerank(query: str, chunks: list[dict], top_k: int) -> list[dict]:
     """
     Re-ranks chunks with a multilingual cross-encoder.
@@ -258,3 +285,111 @@ def rerank(query: str, chunks: list[dict], top_k: int) -> list[dict]:
     scores = model.predict(pairs)
     ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
     return [c for _, c in ranked[:top_k]]
+
+
+# ── Sanitization (defensive, for scanned/OCR PDFs) ──────────────────────────
+
+def _sanitize_text(text: str) -> str:
+    """Removes common OCR artifacts (pipe separators between words, extra spaces)."""
+    import re
+    text = re.sub(r"\s*\|\s*", " ", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
+
+# ── BM25 keyword search (no LLM) ────────────────────────────────────────────
+
+def _keyword_snippet(text: str, query: str, window: int = 150) -> str:
+    """Extracts a snippet centered on the densest cluster of query keywords."""
+    import re
+    clean = _sanitize_text(text)
+    clean_lower = clean.lower()
+    words = [w for w in query.lower().split() if len(w) > 2]
+
+    positions = []
+    for word in words:
+        pos = clean_lower.find(word)
+        if pos != -1:
+            positions.append(pos)
+
+    if not positions:
+        return clean[:300]
+
+    best_pos = positions[0]
+    best_count = 0
+    for pos in positions:
+        count = sum(1 for p in positions if abs(p - pos) <= window * 2)
+        if count > best_count:
+            best_count = count
+            best_pos = pos
+
+    start = max(0, best_pos - window)
+    end = min(len(clean), best_pos + window)
+    snippet = clean[start:end].replace("\n", " ")
+    if start > 0:
+        snippet = "..." + snippet
+    if end < len(clean):
+        snippet = snippet + "..."
+    return snippet
+
+
+def search_bm25(query: str, col_name: str,
+                db_path: str = "./chroma_db",
+                n_results: int = 5) -> list[dict]:
+    """
+    BM25 keyword search over chunks in a collection.
+    Returns the most relevant chunks with score, page, and snippet — no LLM needed.
+    """
+    from rank_bm25 import BM25Okapi
+
+    chunks = retrieve_all(col_name, db_path=db_path)
+    if not chunks:
+        return []
+
+    tokenized = [c["text"].lower().split() for c in chunks]
+    bm25 = BM25Okapi(tokenized)
+    scores = bm25.get_scores(query.lower().split())
+
+    ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
+    top = ranked[:n_results]
+
+    results = []
+    for score, c in top:
+        snippet = _keyword_snippet(c["text"], query)
+        results.append({
+            "page": c["page"],
+            "region": c["region"],
+            "score": round(float(score), 3),
+            "snippet": snippet,
+        })
+    return results
+
+
+def search_bm25_corpus(query: str, corpus_name: str,
+                       db_path: str = "./chroma_db",
+                       n_results: int = 5) -> list[dict]:
+    """BM25 keyword search over a multi-document corpus."""
+    from rank_bm25 import BM25Okapi
+
+    chunks = retrieve_all_corpus(corpus_name, db_path=db_path)
+    if not chunks:
+        return []
+
+    tokenized = [c["text"].lower().split() for c in chunks]
+    bm25 = BM25Okapi(tokenized)
+    scores = bm25.get_scores(query.lower().split())
+
+    ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
+    top = ranked[:n_results]
+
+    results = []
+    for score, c in top:
+        snippet = _keyword_snippet(c["text"], query)
+        results.append({
+            "page": c["page"],
+            "region": c["region"],
+            "pdf_path": c.get("pdf_path", "unknown"),
+            "score": round(float(score), 3),
+            "snippet": snippet,
+        })
+    return results
