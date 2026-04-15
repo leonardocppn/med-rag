@@ -273,3 +273,7 @@ python -m src.cli search archive "anticoagulant therapy"
 - The embedding model (~50MB) is downloaded on first run from HuggingFace. The re-ranking model (~100MB) is downloaded only if `--rerank` is used.
 - Layout profiling is fully adaptive: every parameter is derived from the PDF's own metrics, with no hardcoded document types.
 - Model loading output is suppressed by default for a cleaner experience. Use `--show` to see it.
+
+## License
+
+MIT
