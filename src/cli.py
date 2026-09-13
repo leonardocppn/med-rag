@@ -42,7 +42,7 @@ from .indexer import (
     collection_exists,
     search_bm25, search_bm25_corpus,
 )
-from .chain import ask_stream, summarize_stream, summarize_corpus_stream, chat_stream, ask_corpus_stream, chat_corpus_stream, PHASE_LLM, PHASE_PROGRESS
+from .chain import ask_stream, summarize_stream, summarize_corpus_stream, chat_stream, ask_corpus_stream, chat_corpus_stream, BackendUnavailable, PHASE_LLM, PHASE_PROGRESS
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "../chroma_db")
 
@@ -111,6 +111,8 @@ def _stream_to_console(stream) -> str:
             sys.stdout.write(chunk)
             sys.stdout.flush()
             result.append(chunk)
+    except BackendUnavailable as e:
+        raise click.ClickException(str(e)) from None
     except KeyboardInterrupt:
         stream.close()
         raise

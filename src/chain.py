@@ -37,8 +37,47 @@ def _build_context(chunks: list[dict], with_source: bool = False) -> str:
     return "\n\n".join(parts)
 
 
+class BackendUnavailable(RuntimeError):
+    """The chosen backend cannot serve the request."""
+
+
+def _check_ollama_ready() -> None:
+    """Fails early, and readably, when the local backend cannot answer.
+
+    The ollama client translates a connection error into a readable one only
+    on its non-streaming path, so probing with list() both gets that message
+    and tells us whether the model is there, before any token is asked for.
+    """
+    try:
+        installed = [m.model for m in ollama.list().models if m.model]
+    except ConnectionError as e:
+        raise BackendUnavailable(
+            "No Ollama server is answering. Start it with `ollama serve`, "
+            "or run the command with --model claude."
+        ) from e
+
+    wanted = OLLAMA_MODEL if ":" in OLLAMA_MODEL else f"{OLLAMA_MODEL}:latest"
+    if wanted not in installed:
+        have = ", ".join(installed) or "none installed"
+        raise BackendUnavailable(
+            f"Ollama is running but has no '{OLLAMA_MODEL}'. Pull it with "
+            f"`ollama pull {OLLAMA_MODEL}`, or point OLLAMA_MODEL in .env at "
+            f"one you have ({have})."
+        )
+
+
+def _check_claude_ready() -> None:
+    """The same check for the API backend, before the SDK raises its own."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise BackendUnavailable(
+            "ANTHROPIC_API_KEY is not set. Put it in .env, or run the command "
+            "with --model local to use Ollama."
+        )
+
+
 def _call_ollama(messages: list[dict], system_prompt: str | None = None) -> Iterator[str]:
     """Calls Ollama in streaming and yields tokens."""
+    _check_ollama_ready()
     ollama_messages = []
     if system_prompt:
         ollama_messages.append({"role": "system", "content": system_prompt})
@@ -54,6 +93,7 @@ def _call_ollama(messages: list[dict], system_prompt: str | None = None) -> Iter
 def _call_claude(messages: list[dict], system_prompt: str | None = None,
                  max_tokens: int = 1024) -> Iterator[str]:
     """Calls Claude API in streaming and yields tokens."""
+    _check_claude_ready()
     client = anthropic.Anthropic()
     kwargs: dict = dict(model=CLAUDE_MODEL, max_tokens=max_tokens, messages=messages)
     if system_prompt:
@@ -94,8 +134,32 @@ def ask_stream(query: str, col_name: str,
     yield from _call_llm([{"role": "user", "content": user_message}], system_prompt, backend)
 
 
+def _batch_chunks(chunks: list[dict], max_chars: int) -> list[list[dict]]:
+    """Groups chunks into batches under the character limit.
+
+    Batching on chunk boundaries instead of slicing the context string keeps
+    every excerpt whole, with the page tag that belongs to it.
+    """
+    batches: list[list[dict]] = []
+    current: list[dict] = []
+    current_chars = 0
+    for chunk in chunks:
+        chunk_chars = len(_build_context([chunk]))
+        if current and current_chars + chunk_chars > max_chars:
+            batches.append(current)
+            current = [chunk]
+            current_chars = chunk_chars
+        else:
+            current.append(chunk)
+            current_chars += chunk_chars
+    if current:
+        batches.append(current)
+    return batches
+
+
 def _summarize_batch_sync(batch_text: str, max_tokens: int = 2048) -> str:
     """Calls Claude synchronously to summarize one batch. Raises on error."""
+    _check_claude_ready()
     client = anthropic.Anthropic()
     msg = (
         "Summarize the following section of a document. "
@@ -127,8 +191,8 @@ def _summarize_mapreduce_claude(chunks: list[dict],
                                 system_prompt, max_tokens=4096)
         return
 
-    # Split into batches
-    batches = [context[i:i + _BATCH_CHARS] for i in range(0, len(context), _BATCH_CHARS)]
+    # Split into batches, on chunk boundaries
+    batches = [_build_context(group) for group in _batch_chunks(chunks, _BATCH_CHARS)]
     n = len(batches)
     estimated_secs = n * 30 + (n - 1) * _BATCH_PAUSE_SECS
     estimated_min = max(1, estimated_secs // 60)
@@ -144,10 +208,18 @@ def _summarize_mapreduce_claude(chunks: list[dict],
                 partial = _summarize_batch_sync(batch)
                 partial_summaries.append(partial)
                 break
-            except anthropic.RateLimitError:
+            except anthropic.RateLimitError as e:
                 if attempt == 3:
                     raise
                 wait = _BATCH_PAUSE_SECS * (2 ** attempt)
+                # The server knows better than the backoff when it says so
+                response = getattr(e, "response", None)
+                retry_after = response.headers.get("retry-after") if response is not None else None
+                if retry_after:
+                    try:
+                        wait = int(retry_after) + 5
+                    except ValueError:
+                        pass
                 for remaining in range(wait, 0, -10):
                     yield f"{PHASE_PROGRESS}Rate limit — retrying in {remaining}s..."
                     time.sleep(min(10, remaining))

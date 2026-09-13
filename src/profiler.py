@@ -309,9 +309,40 @@ def derive_params(prof: LayoutProfile) -> ParsingParams:
     """Computes optimal parsing parameters from measured metrics.
 
     No lookup tables or hardcoded types: every parameter is a direct
-    function of the specific PDF's metrics.
+    function of the specific PDF's metrics. Documents whose metrics read as
+    OCR noise rather than layout take a separate set of parameters.
     """
     params = ParsingParams()
+
+    # Continuous-text OCR document, a scanned book for instance:
+    #   - column_density is high because OCR noise on the x0 values produces
+    #     false column positives
+    #   - font_size_levels is high for the same noise, not for real structure
+    # The standard adaptive parameters do not work on these: the font sizes
+    # are not reliable, and the first body block gets classified as a header.
+    is_ocr_text = prof.column_density > 0.8 and prof.font_size_levels > 30
+
+    if is_ocr_text:
+        # Header: cap the threshold at 0.040, about 24pt on a 600pt page.
+        # The real page header, chapter title and number, takes a single line
+        # at top < 20pt, while the body starts around 29pt.
+        params.header_threshold = min(prof.header_zone, 0.040)
+        # Footer: a very high threshold keeps the footnotes, which carry the
+        # citations that make a scanned source worth indexing at all.
+        params.footer_threshold = 0.975
+        # Skip the header only, so the notes survive
+        params.skip_regions = {"header"}
+        # Column detection off: OCR noise generates false positives
+        params.min_columns_for_table = 10
+        # Font sizes unreliable: a high ratio disables title detection
+        params.title_font_ratio = 3.0
+        # Spacing: use the measured value when there is one
+        if prof.line_gap_median > 0:
+            params.line_gap = min(prof.line_gap_median, 5.0)
+        params.chunk_overlap = 1
+        return params
+
+    # --- Standard adaptive parameters (natively digital documents) ---
 
     # Header/footer: use detected boundaries with safety margin
     params.header_threshold = max(prof.header_zone, 0.05)

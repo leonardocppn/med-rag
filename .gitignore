@@ -5,3 +5,10 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+
+# Local editor and tool state
+.claude/
+.*.swp
+.*.swo
+.*.kate-swp
+*~
