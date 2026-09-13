@@ -12,3 +12,8 @@ __pycache__/
 .*.swo
 .*.kate-swp
 *~
+
+# Packaging artifacts
+*.egg-info/
+build/
+dist/

@@ -26,11 +26,11 @@ In `--plain` mode none of that runs: the page text is taken as pdfplumber return
 git clone https://github.com/leonardocppn/med-rag
 cd med-rag
 python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 cp .env.example .env
 ```
 
-Python 3.10 or later. Then fill in `.env`:
+Python 3.10 or later. The install puts a `medrag` command in the virtual environment, so every example below works from anywhere as long as that environment is active. Then fill in `.env`:
 
 ```
 ANTHROPIC_API_KEY=your_key_here   # required for --model claude
@@ -57,19 +57,19 @@ The local model is whatever `OLLAMA_MODEL` names in `.env`, `gemma3:12b` by defa
 One PDF:
 
 ```bash
-python -m src.cli index data/document.pdf
+medrag index data/document.pdf
 ```
 
 Several PDFs in a shared corpus:
 
 ```bash
-python -m src.cli index data/1.pdf data/2.pdf --corpus my-corpus
+medrag index data/1.pdf data/2.pdf --corpus my-corpus
 ```
 
 Without `--corpus` a name is assigned automatically (`corpus_1`, `corpus_2`, and so on). A directory works too, and every PDF inside it goes into a single corpus:
 
 ```bash
-python -m src.cli index data/ --corpus my-data
+medrag index data/ --corpus my-data
 ```
 
 For narrative PDFs add `--plain`, described under [Plain text documents](#plain-text-documents).
@@ -81,7 +81,7 @@ For narrative PDFs add `--plain`, described under [Plain text documents](#plain-
 When PDFs keep arriving in a folder, `sync` indexes only the ones that are not in the corpus yet, recognising them by the hash of their content rather than by filename.
 
 ```bash
-python -m src.cli sync data/
+medrag sync data/
 ```
 
 It takes `--corpus` and `--plain` like `index`.
@@ -91,31 +91,31 @@ It takes `--corpus` and `--plain` like `index`.
 About a single PDF:
 
 ```bash
-python -m src.cli ask data/1.pdf "What is the reference range for hemoglobin?"
+medrag ask data/1.pdf "What is the reference range for hemoglobin?"
 ```
 
 About a whole corpus:
 
 ```bash
-python -m src.cli ask my-corpus "Was I ok with vitamin D in October 2023?"
+medrag ask my-corpus "Was I ok with vitamin D in October 2023?"
 ```
 
 Against Claude instead of the local model:
 
 ```bash
-python -m src.cli ask data/1.pdf "What is the reference range for hemoglobin?" --model claude
+medrag ask data/1.pdf "What is the reference range for hemoglobin?" --model claude
 ```
 
 With cross-encoder re-ranking, which downloads about 100MB the first time:
 
 ```bash
-python -m src.cli ask data/1.pdf "What is the reference range for hemoglobin?" --rerank
+medrag ask data/1.pdf "What is the reference range for hemoglobin?" --rerank
 ```
 
 With a system prompt of your own:
 
 ```bash
-python -m src.cli ask data/1.pdf "What is the reference range for hemoglobin?" --system "You are a medical expert. Answer in technical terms."
+medrag ask data/1.pdf "What is the reference range for hemoglobin?" --system "You are a medical expert. Answer in technical terms."
 ```
 
 > `ask-corpus` exists as an explicit alias that only accepts corpora.
@@ -125,8 +125,8 @@ python -m src.cli ask data/1.pdf "What is the reference range for hemoglobin?" -
 A structured summary of an indexed PDF or corpus:
 
 ```bash
-python -m src.cli summary data/document.pdf
-python -m src.cli summary my-corpus --model claude
+medrag summary data/document.pdf
+medrag summary my-corpus --model claude
 ```
 
 On the Claude backend a document too large for one request is summarised in batches, each pass feeding the next.
@@ -136,8 +136,8 @@ On the Claude backend a document too large for one request is summarised in batc
 An interactive session, with the conversation kept across turns:
 
 ```bash
-python -m src.cli chat data/document.pdf
-python -m src.cli chat my-corpus --model claude
+medrag chat data/document.pdf
+medrag chat my-corpus --model claude
 ```
 
 Type `exit` to leave.
@@ -147,9 +147,9 @@ Type `exit` to leave.
 ### Deleting indexed data
 
 ```bash
-python -m src.cli delete data/document.pdf
-python -m src.cli delete-corpus my-corpus
-python -m src.cli delete-corpus my-corpus --pdf data/document.pdf
+medrag delete data/document.pdf
+medrag delete-corpus my-corpus
+medrag delete-corpus my-corpus --pdf data/document.pdf
 ```
 
 The last form drops one PDF from a corpus and leaves the rest indexed.
@@ -163,7 +163,7 @@ These commands are for PDFs with complex layouts.
 ### Profiling
 
 ```bash
-python -m src.cli profile data/document.pdf
+medrag profile data/document.pdf
 ```
 
 Shows the measured metrics, font distribution, spacing, column density, header and footer zones, next to the thresholds the parser derives from them.
@@ -173,25 +173,25 @@ Shows the measured metrics, font distribution, spacing, column density, header a
 Groups PDFs by layout similarity, which tells you which documents share a structure:
 
 ```bash
-python -m src.cli cluster
+medrag cluster
 ```
 
 With no arguments it uses every PDF profiled so far. Named files are profiled on the spot:
 
 ```bash
-python -m src.cli cluster data/1.pdf data/2.pdf data/3.pdf
+medrag cluster data/1.pdf data/2.pdf data/3.pdf
 ```
 
 The DBSCAN radius is automatic and can be set by hand:
 
 ```bash
-python -m src.cli cluster --eps 0.3
+medrag cluster --eps 0.3
 ```
 
 ### Inspect
 
 ```bash
-python -m src.cli inspect data/document.pdf
+medrag inspect data/document.pdf
 ```
 
 Prints the raw blocks the parser extracted, for when the parsing goes wrong and you need to see where.
@@ -205,7 +205,7 @@ Prints the raw blocks the parser extracted, for when the parsing goes wrong and 
 `--plain` takes the text page by page, with no layout or column detection:
 
 ```bash
-python -m src.cli index data/document.pdf --plain
+medrag index data/document.pdf --plain
 ```
 
 This suits clinical notes, discharge letters and general reports, and also scanned PDFs, where the OCR text carries no reliable spatial structure.
@@ -215,8 +215,8 @@ This suits clinical notes, discharge letters and general reports, and also scann
 `search` looks up keywords without calling any model, and answers instantly. It works on narrative documents; on tabular lab results, where a term repeats across every panel, the ranking is poor.
 
 ```bash
-python -m src.cli search data/report.pdf "atrial fibrillation"
-python -m src.cli search archive "anticoagulant therapy"
+medrag search data/report.pdf "atrial fibrillation"
+medrag search archive "anticoagulant therapy"
 ```
 
 ---
@@ -239,11 +239,11 @@ python -m src.cli search archive "anticoagulant therapy"
 
 | Module | Responsibility |
 |--------|----------------|
-| `src/profiler.py` | Layout analysis, adaptive parameter derivation, profile persistence, DBSCAN clustering |
-| `src/parser.py` | Text extraction with coordinates, line and block grouping, column detection, region classification, artifact cleanup, plain-text mode |
-| `src/indexer.py` | Embedding with fastembed, ChromaDB storage, vector retrieval, cross-encoder re-ranking, BM25 keyword search |
-| `src/chain.py` | RAG orchestration, streaming from either backend, batched summaries, multi-turn conversation |
-| `src/cli.py` | Click commands and terminal output |
+| `medrag/profiler.py` | Layout analysis, adaptive parameter derivation, profile persistence, DBSCAN clustering |
+| `medrag/parser.py` | Text extraction with coordinates, line and block grouping, column detection, region classification, artifact cleanup, plain-text mode |
+| `medrag/indexer.py` | Embedding with fastembed, ChromaDB storage, vector retrieval, cross-encoder re-ranking, BM25 keyword search |
+| `medrag/chain.py` | RAG orchestration, streaming from either backend, batched summaries, multi-turn conversation |
+| `medrag/cli.py` | Click commands and terminal output |
 
 ## Notes
 

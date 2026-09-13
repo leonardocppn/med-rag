@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "med-rag"
+version = "1.0.0"
+description = "Ask questions in plain language about an archive of PDFs, answered locally or through the Claude API."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic",
+    "ollama",
+    "pdfplumber",
+    "chromadb",
+    "fastembed",
+    "sentence-transformers",
+    "rank-bm25",
+    "click",
+    "python-dotenv",
+    "numpy",
+    "scikit-learn",
+]
+
+[project.scripts]
+medrag = "medrag.cli:cli"
+
+[tool.setuptools]
+packages = ["medrag"]
